@@ -23,10 +23,12 @@ jobs:
     timeout-minutes: 20
     env:
       DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-      DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+      DISCORD_GUILD_ID: ${{ vars.DISCORD_GUILD_ID }}
       DISCORD_GUILD_NAME: RWKV
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'gpt-5.6-luna' }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.openai.com/v1' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-5.6-luna' }}
+      LLM_API_MODE: ${{ vars.LLM_API_MODE || 'responses' }}
       TIMEZONE: Asia/Shanghai
       CHANNEL_RULES_PATH: config/channel_rules.json
       GH_TOKEN: ${{ github.token }}
@@ -55,7 +57,11 @@ jobs:
         shell: bash
         run: |
           test -n "$DISCORD_BOT_TOKEN" || { echo "Missing DISCORD_BOT_TOKEN"; exit 1; }
-          test -n "$OPENAI_API_KEY" || { echo "Missing OPENAI_API_KEY"; exit 1; }
+          test -n "$LLM_API_KEY" || { echo "Missing LLM_API_KEY"; exit 1; }
+          case "$LLM_API_MODE" in
+            responses|chat_completions) ;;
+            *) echo "LLM_API_MODE must be responses or chat_completions"; exit 1 ;;
+          esac
 
       - name: Collect Discord messages
         run: python src/discord_daily.py --date "${{ steps.report.outputs.date }}" --output-dir work/run
@@ -89,3 +95,4 @@ jobs:
           else
             gh issue create --title "$TITLE" --body-file "$REPORT"
           fi
+
