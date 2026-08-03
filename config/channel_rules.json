@@ -1,0 +1,20 @@
+{
+  "include_channel_ids": [],
+  "exclude_channel_ids": [],
+  "skip_channel_types": [5],
+  "skip_name_patterns": [
+    "^rules?$",
+    "^server-rules$",
+    "^announcements?$",
+    "^welcome$",
+    "^read[-_ ]?only$",
+    "规则",
+    "公告",
+    "只读",
+    "须知"
+  ],
+  "include_bot_messages": false,
+  "max_messages_per_channel": 1000,
+  "scan_archived_threads": true
+}
+
