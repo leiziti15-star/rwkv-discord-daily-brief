@@ -1,0 +1,7 @@
+.env
+work/*.json
+work/*.md
+outputs/*.md
+work/real/
+__pycache__/
+*.pyc
