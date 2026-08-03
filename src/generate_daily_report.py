@@ -16,9 +16,9 @@ from typing import Any
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_API_MODE = "responses"
-DEFAULT_MAX_INPUT_CHARS = 200_000
-DEFAULT_MAX_OUTPUT_TOKENS = 2_500
-DEFAULT_TIMEOUT_SECONDS = 420
+DEFAULT_MAX_INPUT_CHARS = 40_000
+DEFAULT_MAX_OUTPUT_TOKENS = 1_600
+DEFAULT_TIMEOUT_SECONDS = 240
 
 INSTRUCTIONS = """你是 RWKV Discord 社区的技术情报编辑。读者是 RWKV 架构作者。
 
@@ -255,6 +255,15 @@ def main() -> int:
             return 2
         limit = int(os.environ.get("MAX_INPUT_CHARS", DEFAULT_MAX_INPUT_CHARS))
         message_text, included = compact_messages(payload, limit)
+        print(
+            json.dumps(
+                {
+                    "llm_input_chars": len(message_text),
+                    "llm_input_message_count": included,
+                    "llm_input_omitted_count": max(0, len(messages) - included),
+                }
+            )
+        )
         report_body = call_llm(
             api_key,
             args.base_url,
