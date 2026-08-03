@@ -17,6 +17,8 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_API_MODE = "responses"
 DEFAULT_MAX_INPUT_CHARS = 200_000
+DEFAULT_MAX_OUTPUT_TOKENS = 2_500
+DEFAULT_TIMEOUT_SECONDS = 420
 
 INSTRUCTIONS = """你是 RWKV Discord 社区的技术情报编辑。读者是 RWKV 架构作者。
 
@@ -146,7 +148,12 @@ def api_endpoint(base_url: str, api_mode: str) -> str:
     return base if base.endswith(suffix) else f"{base}{suffix}"
 
 
-def build_request_body(\n    model: str,\n    api_mode: str,\n    prompt: str,\n    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,\n) -> dict[str, Any]:
+def build_request_body(
+    model: str,
+    api_mode: str,
+    prompt: str,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> dict[str, Any]:
     if api_mode == "responses":
         return {
             "model": model,
@@ -171,7 +178,15 @@ def call_llm(
     api_mode: str,
     prompt: str,
 ) -> str:
-    request_body = build_request_body(model, api_mode, prompt)
+    max_output_tokens = int(
+        os.environ.get("LLM_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)
+    )
+    timeout_seconds = int(
+        os.environ.get("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
+    )
+    request_body = build_request_body(
+        model, api_mode, prompt, max_output_tokens=max_output_tokens
+    )
     request = urllib.request.Request(
         api_endpoint(base_url, api_mode),
         data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
@@ -189,6 +204,10 @@ def call_llm(
         raise RuntimeError(f"LLM API returned HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Unable to connect to LLM API: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"LLM API did not respond within {timeout_seconds} seconds"
+        ) from exc
     text = (
         extract_output_text(result)
         if api_mode == "responses"
@@ -270,4 +289,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
