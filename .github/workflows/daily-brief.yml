@@ -1,0 +1,93 @@
+name: RWKV Discord Daily Brief
+
+on:
+  schedule:
+    # 00:00 UTC = 08:00 Asia/Shanghai
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      report_date:
+        description: "Optional report date in YYYY-MM-DD (Asia/Shanghai)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: rwkv-daily-brief
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+      DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+      DISCORD_GUILD_NAME: RWKV
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'gpt-5.6-luna' }}
+      TIMEZONE: Asia/Shanghai
+      CHANNEL_RULES_PATH: config/channel_rules.json
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve report date
+        id: report
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.report_date }}" ]]; then
+            REPORT_DATE="${{ inputs.report_date }}"
+          else
+            REPORT_DATE="$(python -c 'from datetime import datetime,timedelta; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo("Asia/Shanghai")).date()-timedelta(days=1))')"
+          fi
+          echo "date=$REPORT_DATE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          test -n "$DISCORD_BOT_TOKEN" || { echo "Missing DISCORD_BOT_TOKEN"; exit 1; }
+          test -n "$OPENAI_API_KEY" || { echo "Missing OPENAI_API_KEY"; exit 1; }
+
+      - name: Collect Discord messages
+        run: python src/discord_daily.py --date "${{ steps.report.outputs.date }}" --output-dir work/run
+
+      - name: Generate daily brief
+        run: python src/generate_daily_report.py "work/run/discord_messages_${{ steps.report.outputs.date }}.json" --output-dir reports
+
+      - name: Commit report only
+        shell: bash
+        run: |
+          REPORT="reports/${{ steps.report.outputs.date }}.md"
+          git config user.name "rwkv-daily-brief[bot]"
+          git config user.email "rwkv-daily-brief[bot]@users.noreply.github.com"
+          git add -- "$REPORT"
+          if git diff --cached --quiet; then
+            echo "Report unchanged; no commit needed."
+          else
+            git commit -m "daily brief: ${{ steps.report.outputs.date }}"
+            git push
+          fi
+
+      - name: Create or update daily Issue
+        shell: bash
+        run: |
+          DATE="${{ steps.report.outputs.date }}"
+          TITLE="RWKV Discord Daily Brief | $DATE"
+          REPORT="reports/$DATE.md"
+          NUMBER="$(gh issue list --state all --search "\"$TITLE\" in:title" --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n 1)"
+          if [[ -n "$NUMBER" ]]; then
+            gh issue edit "$NUMBER" --body-file "$REPORT"
+          else
+            gh issue create --title "$TITLE" --body-file "$REPORT"
+          fi
