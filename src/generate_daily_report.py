@@ -146,13 +146,13 @@ def api_endpoint(base_url: str, api_mode: str) -> str:
     return base if base.endswith(suffix) else f"{base}{suffix}"
 
 
-def build_request_body(model: str, api_mode: str, prompt: str) -> dict[str, Any]:
+def build_request_body(\n    model: str,\n    api_mode: str,\n    prompt: str,\n    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,\n) -> dict[str, Any]:
     if api_mode == "responses":
         return {
             "model": model,
             "instructions": INSTRUCTIONS,
             "input": prompt,
-            "max_output_tokens": 6000,
+            "max_output_tokens": max_output_tokens,
         }
     return {
         "model": model,
@@ -160,7 +160,7 @@ def build_request_body(model: str, api_mode: str, prompt: str) -> dict[str, Any]
             {"role": "system", "content": INSTRUCTIONS},
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": 6000,
+        "max_tokens": max_output_tokens,
     }
 
 
@@ -182,7 +182,7 @@ def call_llm(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             result = json.load(response)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
