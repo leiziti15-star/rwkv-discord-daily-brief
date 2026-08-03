@@ -26,9 +26,9 @@ jobs:
       DISCORD_GUILD_ID: ${{ vars.DISCORD_GUILD_ID }}
       DISCORD_GUILD_NAME: RWKV
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.openai.com/v1' }}
-      LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-5.6-luna' }}
-      LLM_API_MODE: ${{ vars.LLM_API_MODE || 'responses' }}
+      LLM_BASE_URL: https://next-token.cc/v1
+      LLM_MODEL: deepseek-v4-flash
+      LLM_API_MODE: chat_completions
       TIMEZONE: Asia/Shanghai
       CHANNEL_RULES_PATH: config/channel_rules.json
       GH_TOKEN: ${{ github.token }}
