@@ -18,7 +18,7 @@ GitHub Actions 每天北京时间 08:00 运行：
 
 1. 使用只读 Discord Bot API 抓取前一天 00:00–24:00 的消息；
 2. 自动忽略公告、规则、只读频道和当天没有消息的频道；
-3. 使用 OpenAI Responses API 生成简报；
+3. 使用 OpenAI 或兼容中转站 API 生成简报；
 4. 仅提交 `reports/YYYY-MM-DD.md`，不上传原始聊天记录；
 5. 创建同日期 GitHub Issue，方便团队成员订阅和讨论。
 
@@ -29,12 +29,20 @@ GitHub Actions 每天北京时间 08:00 运行：
 在仓库 `Settings → Secrets and variables → Actions` 中添加：
 
 - `DISCORD_BOT_TOKEN`：Discord Developer Portal 的 Bot Token；
-- `OPENAI_API_KEY`：OpenAI Platform API Key。
+- `LLM_API_KEY`：OpenAI 或中转站 API Key。
 
 可选：
 
 - `DISCORD_GUILD_ID`：通常留空，程序会自动选择唯一服务器或名称包含 RWKV 的服务器；
-- `OPENAI_MODEL`：默认 `gpt-5.6-luna`，适合低成本日报总结。
+- `LLM_BASE_URL`：API 基础地址，例如 `https://api.openai.com/v1`；
+- `LLM_MODEL`：中转站提供的模型名称；
+- `LLM_API_MODE`：`responses` 或 `chat_completions`。
+
+`LLM_BASE_URL`、`LLM_MODEL` 和 `LLM_API_MODE` 是非敏感配置，建议放在仓库的
+`Settings → Secrets and variables → Actions → Variables` 中。为保护密钥传输，
+`LLM_BASE_URL` 必须使用 HTTPS。
+
+定时计划会在一次真实手动运行成功后启用；启用前不会自动生成可能不准确的日报。
 
 不要把真实密钥写进代码、Issue、聊天或报告。
 
@@ -57,3 +65,4 @@ python src/generate_daily_report.py work/discord_messages_2026-08-02.json
 ```
 
 本地 `.env` 已被 `.gitignore` 排除，不会上传。
+
