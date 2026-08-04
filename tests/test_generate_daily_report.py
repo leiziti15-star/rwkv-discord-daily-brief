@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from generate_daily_report import (
+    add_activity_summary,
     api_endpoint,
     build_request_body,
     compact_messages,
@@ -133,6 +134,24 @@ class GenerateDailyReportTests(unittest.TestCase):
         normalized = normalize_report(report)
         self.assertIn("- **开发者需求**：", normalized)
         self.assertIn("需要示例", normalized)
+
+    def test_add_activity_summary_precedes_overview_body(self) -> None:
+        payload = {
+            "report_date": "2026-08-03",
+            "messages": [
+                {"channel_id": "1", "channel_name": "research"},
+                {"channel_id": "1", "channel_name": "research"},
+                {"channel_id": "2", "channel_name": "general"},
+            ],
+        }
+        report = add_activity_summary(empty_report(payload), payload)
+        expected = (
+            "## 总览 Brief\n\n"
+            "> **过去 24 小时频道更新**：北京时间 2026-08-03 00:00–24:00，"
+            "共 **2 个频道**有更新：#research、#general。"
+        )
+        self.assertIn(expected, report)
+        self.assertLess(report.index("过去 24 小时频道更新"), report.index("报告窗口内"))
 
 
 if __name__ == "__main__":
