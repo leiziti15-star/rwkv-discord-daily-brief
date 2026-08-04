@@ -14,6 +14,7 @@ from generate_daily_report import (
     extract_chat_completion_stream,
     extract_chat_completion_text,
     extract_output_text,
+    validate_report,
 )
 
 
@@ -88,6 +89,14 @@ class GenerateDailyReportTests(unittest.TestCase):
             "## General",
         ):
             self.assertIn(title, report)
+
+    def test_validate_report_accepts_complete_report(self) -> None:
+        validate_report(empty_report({}))
+
+    def test_validate_report_rejects_truncated_source_link(self) -> None:
+        report = empty_report({}) + "\n[原消息](https://discord.com/channels/1/2"
+        with self.assertRaises(RuntimeError):
+            validate_report(report)
 
 
 if __name__ == "__main__":
