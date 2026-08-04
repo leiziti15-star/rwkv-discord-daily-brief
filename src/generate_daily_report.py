@@ -196,7 +196,9 @@ def normalize_report(report: str) -> str:
             if marker_count != valid_count:
                 continue
             if line.lstrip().startswith("-") and valid_count == 0:
-                if line.strip() != "- 无值得报告的新内容。":
+                is_empty_notice = line.strip() == "- 无值得报告的新内容。"
+                is_group_label = line.rstrip().endswith("：")
+                if not (is_empty_notice or is_group_label):
                     continue
             safe_lines.append(line.rstrip())
         safe_content = "\n".join(safe_lines).strip()
