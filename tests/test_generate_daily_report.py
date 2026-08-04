@@ -14,6 +14,7 @@ from generate_daily_report import (
     extract_chat_completion_stream,
     extract_chat_completion_text,
     extract_output_text,
+    normalize_report,
     validate_report,
 )
 
@@ -97,6 +98,21 @@ class GenerateDailyReportTests(unittest.TestCase):
         report = empty_report({}) + "\n[原消息](https://discord.com/channels/1/2"
         with self.assertRaises(RuntimeError):
             validate_report(report)
+
+    def test_normalize_report_drops_truncated_line_and_restores_sections(self) -> None:
+        report = """## 总览 Brief
+
+- 可验证要点。[原消息](https://discord.com/channels/1/2/3)
+
+## RWKV 技术相关讨论
+
+- 被截断的要点。[原消息](https://discord.com/channels/1/2
+"""
+        normalized = normalize_report(report)
+        validate_report(normalized)
+        self.assertIn("可验证要点", normalized)
+        self.assertNotIn("被截断的要点", normalized)
+        self.assertIn("## General\n\n- 无值得报告的新内容。", normalized)
 
 
 if __name__ == "__main__":
