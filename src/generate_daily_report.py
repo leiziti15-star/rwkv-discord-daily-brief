@@ -164,6 +164,45 @@ def validate_report(report: str) -> None:
         raise RuntimeError("Generated report contains an incomplete Discord source link")
 
 
+def normalize_report(report: str) -> str:
+    """Keep complete source-linked content and restore the canonical section skeleton."""
+    cleaned = report.replace("```markdown", "").replace("```", "").strip()
+    if not any(heading in cleaned for heading in REQUIRED_HEADINGS):
+        raise RuntimeError("Generated report did not contain any required section")
+
+    sections: list[str] = []
+    for index, heading in enumerate(REQUIRED_HEADINGS):
+        start = cleaned.find(heading)
+        if start < 0:
+            content = ""
+        else:
+            start += len(heading)
+            later_positions = [
+                cleaned.find(candidate, start)
+                for candidate in REQUIRED_HEADINGS[index + 1 :]
+            ]
+            later_positions = [position for position in later_positions if position >= 0]
+            end = min(later_positions) if later_positions else len(cleaned)
+            content = cleaned[start:end].strip()
+
+        safe_lines: list[str] = []
+        for line in content.splitlines():
+            marker_count = line.count("[原消息](")
+            valid_count = len(
+                re.findall(
+                    r"\[原消息\]\(https://discord\.com/channels/\d+/\d+/\d+\)", line
+                )
+            )
+            if marker_count != valid_count:
+                continue
+            safe_lines.append(line.rstrip())
+        safe_content = "\n".join(safe_lines).strip()
+        if not safe_content:
+            safe_content = "- 无值得报告的新内容。"
+        sections.append(f"{heading}\n\n{safe_content}")
+    return "\n\n".join(sections)
+
+
 def empty_report(payload: dict[str, Any]) -> str:
     return "\n".join(
         [
@@ -324,6 +363,7 @@ def main() -> int:
         included = 0
         report_body = empty_report(payload)
 
+    report_body = normalize_report(report_body)
     validate_report(report_body)
 
     stats = payload.get("stats", {})
