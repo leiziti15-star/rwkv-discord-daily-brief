@@ -1,7 +1,10 @@
 name: RWKV Discord Daily Brief
 
 on:
-  # Schedule will be enabled after required secrets pass a real manual run.
+  # One-time end-to-end verification; remove after this run passes.
+  push:
+    paths:
+      - ".github/workflows/daily-brief.yml"
   workflow_dispatch:
     inputs:
       report_date:
@@ -95,4 +98,3 @@ jobs:
           else
             gh issue create --title "$TITLE" --body-file "$REPORT"
           fi
-
