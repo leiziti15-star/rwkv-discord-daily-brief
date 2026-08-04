@@ -42,7 +42,7 @@ GitHub Actions 每天北京时间 08:00 运行：
 `Settings → Secrets and variables → Actions → Variables` 中。为保护密钥传输，
 `LLM_BASE_URL` 必须使用 HTTPS。
 
-定时计划会在一次真实手动运行成功后启用；启用前不会自动生成可能不准确的日报。
+定时计划已在真实端到端运行和人工核验通过后启用；当前使用 `deepseek-v4-flash`，每天北京时间 08:00 生成前一天的日报。
 
 不要把真实密钥写进代码、Issue、聊天或报告。
 
@@ -65,4 +65,3 @@ python src/generate_daily_report.py work/discord_messages_2026-08-02.json
 ```
 
 本地 `.env` 已被 `.gitignore` 排除，不会上传。
-
