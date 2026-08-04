@@ -1,7 +1,7 @@
 name: RWKV Discord Daily Brief
 
 on:
-  # One-time end-to-end verification (attempt 3); remove after this run passes.
+  # One-time end-to-end verification (attempt 4); remove after this run passes.
   push:
     paths:
       - ".github/workflows/daily-brief.yml"
