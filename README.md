@@ -19,7 +19,7 @@ GitHub Actions 每天北京时间 08:00 运行：
 
 1. 使用只读 Discord Bot API 抓取前一天 00:00–24:00 的消息；
 2. 自动忽略公告、规则、只读频道和当天没有消息的频道；
-3. 使用 OpenAI 或兼容中转站 API 生成简报；
+3. 使用 DeepSeek API 生成简报；
 4. 仅提交 `reports/YYYY-MM-DD.md`，不上传原始聊天记录；
 5. 创建同日期 GitHub Issue，方便团队成员订阅和讨论。
 
