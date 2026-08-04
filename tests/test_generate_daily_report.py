@@ -124,6 +124,16 @@ class GenerateDailyReportTests(unittest.TestCase):
         self.assertNotIn("没有来源的概括", normalized)
         self.assertIn("## RWKV 技术相关讨论\n\n- 无值得报告的新内容。", normalized)
 
+    def test_normalize_report_keeps_structural_group_labels(self) -> None:
+        report = empty_report({}).replace(
+            "- 无值得报告的新内容。",
+            "- **开发者需求**：\n  - 需要示例。[原消息](https://discord.com/channels/1/2/3)",
+            1,
+        )
+        normalized = normalize_report(report)
+        self.assertIn("- **开发者需求**：", normalized)
+        self.assertIn("需要示例", normalized)
+
 
 if __name__ == "__main__":
     unittest.main()
