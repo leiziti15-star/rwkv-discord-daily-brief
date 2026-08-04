@@ -11,6 +11,7 @@ from generate_daily_report import (
     build_request_body,
     compact_messages,
     empty_report,
+    extract_chat_completion_stream,
     extract_chat_completion_text,
     extract_output_text,
 )
@@ -32,6 +33,14 @@ class GenerateDailyReportTests(unittest.TestCase):
         response = {"choices": [{"message": {"content": "hello from chat"}}]}
         self.assertEqual(extract_chat_completion_text(response), "hello from chat")
 
+    def test_extract_chat_completion_stream(self) -> None:
+        response = [
+            b'data: {"choices":[{"delta":{"content":"hello "}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"stream"}}]}\n',
+            b'data: [DONE]\n',
+        ]
+        self.assertEqual(extract_chat_completion_stream(response), "hello stream")
+
     def test_api_endpoint(self) -> None:
         self.assertEqual(
             api_endpoint("https://example.com/v1", "responses"),
@@ -50,6 +59,7 @@ class GenerateDailyReportTests(unittest.TestCase):
         body = build_request_body("model-x", "chat_completions", "prompt")
         self.assertEqual(body["model"], "model-x")
         self.assertEqual(body["messages"][-1]["content"], "prompt")
+        self.assertTrue(body["stream"])
 
     def test_compact_messages_keeps_verification_link(self) -> None:
         payload = {
@@ -82,4 +92,3 @@ class GenerateDailyReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
