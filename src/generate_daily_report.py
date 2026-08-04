@@ -114,6 +114,25 @@ def extract_chat_completion_text(response: dict[str, Any]) -> str:
     return ""
 
 
+def extract_chat_completion_stream(response: Any) -> str:
+    parts: list[str] = []
+    for raw_line in response:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        event = json.loads(data)
+        choices = event.get("choices", [])
+        if not choices:
+            continue
+        content = choices[0].get("delta", {}).get("content")
+        if isinstance(content, str) and content:
+            parts.append(content)
+    return "".join(parts).strip()
+
+
 def empty_report(payload: dict[str, Any]) -> str:
     return "\n".join(
         [
@@ -168,6 +187,7 @@ def build_request_body(
             {"role": "user", "content": prompt},
         ],
         "max_tokens": max_output_tokens,
+        "stream": True,
     }
 
 
@@ -198,7 +218,10 @@ def call_llm(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            result = json.load(response)
+            if api_mode == "chat_completions":
+                text = extract_chat_completion_stream(response)
+            else:
+                text = extract_output_text(json.load(response))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
         raise RuntimeError(f"LLM API returned HTTP {exc.code}: {detail}") from exc
@@ -208,11 +231,6 @@ def call_llm(
         raise RuntimeError(
             f"LLM API did not respond within {timeout_seconds} seconds"
         ) from exc
-    text = (
-        extract_output_text(result)
-        if api_mode == "responses"
-        else extract_chat_completion_text(result)
-    )
     if not text:
         raise RuntimeError("LLM API response did not contain usable text")
     return text
