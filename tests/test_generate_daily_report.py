@@ -114,6 +114,16 @@ class GenerateDailyReportTests(unittest.TestCase):
         self.assertNotIn("被截断的要点", normalized)
         self.assertIn("## General\n\n- 无值得报告的新内容。", normalized)
 
+    def test_normalize_report_drops_source_less_claims(self) -> None:
+        report = empty_report({}).replace(
+            "- 无值得报告的新内容。",
+            "- 没有来源的概括。",
+            1,
+        )
+        normalized = normalize_report(report)
+        self.assertNotIn("没有来源的概括", normalized)
+        self.assertIn("## RWKV 技术相关讨论\n\n- 无值得报告的新内容。", normalized)
+
 
 if __name__ == "__main__":
     unittest.main()
