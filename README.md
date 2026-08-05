@@ -1,6 +1,6 @@
 # RWKV Discord Daily Brief
 
-每天自动读取 RWKV Discord 中 Bot 有权限查看的活跃文字频道，生成面向 RWKV 架构作者的中文简报，并发布到本 GitHub 私有仓库。
+每天自动读取 RWKV Discord 中 Bot 有权限查看的活跃文字频道，生成面向 RWKV 架构团队的中文简报，并发布到本 GitHub 私有仓库。
 
 ## 日报结构
 
