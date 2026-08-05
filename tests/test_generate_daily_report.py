@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,20 +8,44 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from generate_daily_report import (
+    INSTRUCTIONS,
     add_activity_summary,
+    add_todo_summary,
     api_endpoint,
+    build_prompt,
     build_request_body,
     compact_messages,
     empty_report,
+    enforce_todo_window,
     extract_chat_completion_stream,
     extract_chat_completion_text,
     extract_output_text,
+    load_recent_todo_reminders,
     normalize_report,
+    recent_todo_items,
+    replace_todo_items,
     validate_report,
 )
 
 
 class GenerateDailyReportTests(unittest.TestCase):
+    def test_instructions_apply_rwkv_relevance_gate_to_august_4_cases(self) -> None:
+        self.assertIn("未关联 RWKV 的 llama.cpp/Qwen 内核问题", INSTRUCTIONS)
+        self.assertIn("DeepSeek 观点争议", INSTRUCTIONS)
+        self.assertIn("媒体内容质量评价应过滤", INSTRUCTIONS)
+        self.assertIn("只能写入 General", INSTRUCTIONS)
+
+    def test_instructions_keep_official_posts_separate_and_todo_last(self) -> None:
+        self.assertIn("不要仅因发言者是 BlinkDL 就视为官方发布", INSTRUCTIONS)
+        self.assertLess(
+            INSTRUCTIONS.index("## RWKV 官方发布与作者动态"),
+            INSTRUCTIONS.index("## RWKV 技术相关讨论"),
+        )
+        self.assertLess(
+            INSTRUCTIONS.index("## General"),
+            INSTRUCTIONS.index("## RWKV 待跟进问题"),
+        )
+
     def test_extract_output_text(self) -> None:
         response = {
             "output": [
@@ -85,10 +110,12 @@ class GenerateDailyReportTests(unittest.TestCase):
         report = empty_report({})
         for title in (
             "## 总览 Brief",
+            "## RWKV 官方发布与作者动态",
             "## RWKV 技术相关讨论",
             "## Bug 与问题",
             "## 社区反馈",
             "## General",
+            "## RWKV 待跟进问题",
         ):
             self.assertIn(title, report)
 
@@ -153,6 +180,68 @@ class GenerateDailyReportTests(unittest.TestCase):
         self.assertIn(expected, report)
         self.assertLess(report.index("过去 24 小时频道更新"), report.index("报告窗口内"))
 
+    def test_todo_window_keeps_seven_report_dates_and_adds_rule(self) -> None:
+        report = replace_todo_items(
+            empty_report({}),
+            [
+                "- [ ] **待回复**｜提问时间：2026-08-01 09:30（北京时间）｜仍有效。[原消息](https://discord.com/channels/1/2/3)",
+                "- [ ] **待回复**｜提问时间：2026-07-31 09:30（北京时间）｜已过期。[原消息](https://discord.com/channels/1/2/4)",
+                "- [ ] **待回复**｜没有时间｜格式错误。[原消息](https://discord.com/channels/1/2/5)",
+            ],
+        )
+        report = enforce_todo_window(report, "2026-08-07")
+        self.assertIn("提问提醒最多保留 **7 天**，请及时回应", report)
+        self.assertIn("仍有效", report)
+        self.assertNotIn("已过期", report)
+        self.assertNotIn("格式错误", report)
+
+    def test_todo_summary_counts_new_and_rolling_items(self) -> None:
+        report = replace_todo_items(
+            empty_report({}),
+            [
+                "- [ ] **待回复**｜提问时间：2026-08-07 09:30（北京时间）｜新问题。[原消息](https://discord.com/channels/1/2/3)",
+                "- [ ] **需文档跟进**｜提问时间：2026-08-03 10:00（北京时间）｜旧问题。[原消息](https://discord.com/channels/1/2/4)",
+            ],
+        )
+        report = add_todo_summary(report, "2026-08-07")
+        self.assertIn("本期新增 **1 项**，7 日内累计 **2 项**", report)
+
+    def test_load_recent_todo_reminders_deduplicates_by_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory)
+            older = replace_todo_items(
+                empty_report({}),
+                [
+                    "- [ ] **待回复**｜提问时间：2026-08-03 10:00（北京时间）｜旧摘要。[原消息](https://discord.com/channels/1/2/3)"
+                ],
+            )
+            newer = older.replace("旧摘要", "更新摘要")
+            (output_dir / "2026-08-04.md").write_text(older, encoding="utf-8")
+            (output_dir / "2026-08-05.md").write_text(newer, encoding="utf-8")
+            reminders = load_recent_todo_reminders(output_dir, "2026-08-06")
+        self.assertEqual(len(reminders), 1)
+        self.assertIn("更新摘要", reminders[0])
+
+    def test_prompt_contains_previous_reminders(self) -> None:
+        reminder = "- [ ] **待回复**｜提问时间：2026-08-03 10:00（北京时间）｜问题。[原消息](https://discord.com/channels/1/2/3)"
+        prompt = build_prompt(
+            {"report_date": "2026-08-04", "messages": [], "stats": {}},
+            "messages",
+            0,
+            previous_reminders=[reminder],
+        )
+        self.assertIn(reminder, prompt)
+
+    def test_recent_todo_items_ignores_future_dates(self) -> None:
+        report = replace_todo_items(
+            empty_report({}),
+            [
+                "- [ ] **待回复**｜提问时间：2026-08-08 10:00（北京时间）｜未来问题。[原消息](https://discord.com/channels/1/2/3)"
+            ],
+        )
+        self.assertEqual(recent_todo_items(report, "2026-08-07"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
+
