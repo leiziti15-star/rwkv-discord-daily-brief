@@ -24,6 +24,7 @@ from generate_daily_report import (
     normalize_report,
     recent_todo_items,
     replace_todo_items,
+    unwrap_source_link_code,
     validate_report,
 )
 
@@ -126,6 +127,39 @@ class GenerateDailyReportTests(unittest.TestCase):
         report = empty_report({}) + "\n[原消息](https://discord.com/channels/1/2"
         with self.assertRaises(RuntimeError):
             validate_report(report)
+
+    def test_validate_report_rejects_source_link_formatted_as_code(self) -> None:
+        report = empty_report({}).replace(
+            "- 无值得报告的新内容。",
+            "- 内容。`[原消息](https://discord.com/channels/1/2/3)`",
+            1,
+        )
+        with self.assertRaises(RuntimeError):
+            validate_report(report)
+
+    def test_unwrap_source_link_code_hides_raw_discord_url(self) -> None:
+        coded = (
+            "内容。`[原消息](https://discord.com/channels/1/2/3)` "
+            "``[原消息](https://discord.com/channels/1/2/4)``"
+        )
+        normalized = unwrap_source_link_code(coded)
+        self.assertEqual(
+            normalized,
+            "内容。[原消息](https://discord.com/channels/1/2/3) "
+            "[原消息](https://discord.com/channels/1/2/4)",
+        )
+        self.assertNotIn("`[原消息]", normalized)
+
+    def test_normalize_report_unwraps_source_link_code(self) -> None:
+        report = empty_report({}).replace(
+            "- 无值得报告的新内容。",
+            "- 内容。`[原消息](https://discord.com/channels/1/2/3)`",
+            1,
+        )
+        normalized = normalize_report(report)
+        self.assertIn("内容。[原消息](https://discord.com/channels/1/2/3)", normalized)
+        self.assertNotIn("`[原消息]", normalized)
+        validate_report(normalized)
 
     def test_normalize_report_drops_truncated_line_and_restores_sections(self) -> None:
         report = """## 总览 Brief
