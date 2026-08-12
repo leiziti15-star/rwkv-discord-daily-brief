@@ -22,7 +22,7 @@ concurrency:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
       DISCORD_GUILD_ID: ${{ vars.DISCORD_GUILD_ID }}
@@ -31,6 +31,10 @@ jobs:
       LLM_BASE_URL: https://next-token.cc/v1
       LLM_MODEL: deepseek-v4-flash
       LLM_API_MODE: chat_completions
+      LLM_RETRIES: 2
+      LLM_RETRY_BASE_SECONDS: 2
+      LLM_TIMEOUT_SECONDS: 120
+      MAX_INPUT_CHARS: 40000
       TIMEZONE: Asia/Shanghai
       CHANNEL_RULES_PATH: config/channel_rules.json
       GH_TOKEN: ${{ github.token }}
@@ -59,7 +63,9 @@ jobs:
         shell: bash
         run: |
           test -n "$DISCORD_BOT_TOKEN" || { echo "Missing DISCORD_BOT_TOKEN"; exit 1; }
-          test -n "$LLM_API_KEY" || { echo "Missing LLM_API_KEY"; exit 1; }
+          if [[ -z "$LLM_API_KEY" ]]; then
+            echo "Warning: Missing LLM_API_KEY; a rules-based degraded report will be published."
+          fi
           case "$LLM_API_MODE" in
             responses|chat_completions) ;;
             *) echo "LLM_API_MODE must be responses or chat_completions"; exit 1 ;;
