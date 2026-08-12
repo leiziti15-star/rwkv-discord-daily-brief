@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,8 +13,11 @@ from generate_daily_report import (
     add_activity_summary,
     add_todo_summary,
     api_endpoint,
+    build_degraded_report,
     build_prompt,
     build_request_body,
+    call_llm,
+    compact_message_batches,
     compact_messages,
     empty_report,
     enforce_todo_window,
@@ -22,6 +26,7 @@ from generate_daily_report import (
     extract_output_text,
     load_recent_todo_reminders,
     normalize_report,
+    generate_report_with_batches,
     recent_todo_items,
     replace_todo_items,
     unwrap_source_link_code,
@@ -90,6 +95,12 @@ class GenerateDailyReportTests(unittest.TestCase):
         self.assertEqual(body["messages"][-1]["content"], "prompt")
         self.assertTrue(body["stream"])
 
+    def test_chat_request_body_supports_non_streaming_fallback(self) -> None:
+        body = build_request_body(
+            "model-x", "chat_completions", "prompt", stream=False
+        )
+        self.assertFalse(body["stream"])
+
     def test_compact_messages_keeps_verification_link(self) -> None:
         payload = {
             "messages": [
@@ -107,6 +118,93 @@ class GenerateDailyReportTests(unittest.TestCase):
         self.assertEqual(included, 1)
         self.assertIn("https://discord.com/channels/1/2/3", text)
 
+    def test_message_batches_cover_every_message_without_omission(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "timestamp": f"2026-08-02T01:0{index}:03+08:00",
+                    "channel_name": "research",
+                    "author": {"username": "dev", "id": str(index)},
+                    "content": f"RWKV message {index} " + ("x" * 80),
+                    "url": f"https://discord.com/channels/1/2/{index + 1}",
+                    "attachments": [],
+                }
+                for index in range(6)
+            ]
+        }
+        batches = compact_message_batches(payload, 420)
+        self.assertGreater(len(batches), 1)
+        self.assertEqual(sum(count for _text, count in batches), 6)
+        combined = "".join(text for text, _count in batches)
+        for index in range(6):
+            self.assertIn(f"RWKV message {index}", combined)
+
+    @patch("generate_daily_report.call_llm")
+    def test_large_report_calls_every_batch_and_final_merge(self, llm) -> None:
+        llm.side_effect = ["partial one", "partial two", "merged"]
+        payload = {
+            "report_date": "2026-08-11",
+            "messages": [
+                {
+                    "timestamp": f"2026-08-11T01:0{index}:03+08:00",
+                    "channel_name": "research",
+                    "author": {"username": "dev"},
+                    "content": f"RWKV message {index} " + ("x" * 120),
+                    "url": f"https://discord.com/channels/1/2/{index + 1}",
+                    "attachments": [],
+                }
+                for index in range(4)
+            ],
+            "stats": {},
+        }
+        result = generate_report_with_batches(
+            "key", "https://example.com/v1", "m", "chat_completions", payload, 600
+        )
+        self.assertEqual(result, "merged")
+        self.assertEqual(llm.call_count, 3)
+        final_prompt = llm.call_args_list[-1].args[-1]
+        self.assertIn("partial one", final_prompt)
+        self.assertIn("partial two", final_prompt)
+
+    @patch("generate_daily_report.time.sleep")
+    @patch("generate_daily_report.request_llm_once")
+    def test_call_llm_retries_empty_stream_then_uses_non_streaming(
+        self, request_once, sleep
+    ) -> None:
+        from generate_daily_report import LLMRequestError
+
+        request_once.side_effect = [
+            LLMRequestError("empty", retriable=True),
+            LLMRequestError("empty", retriable=True),
+            "final report",
+        ]
+        with patch.dict(
+            "os.environ", {"LLM_RETRIES": "2", "LLM_RETRY_BASE_SECONDS": "0"}
+        ):
+            result = call_llm("key", "https://example.com/v1", "m", "chat_completions", "p")
+        self.assertEqual(result, "final report")
+        self.assertEqual(request_once.call_count, 3)
+        self.assertEqual(
+            [call.kwargs["stream"] for call in request_once.call_args_list],
+            [True, True, False],
+        )
+        self.assertEqual(sleep.call_count, 2)
+
+    @patch("generate_daily_report.time.sleep")
+    @patch("generate_daily_report.request_llm_once")
+    def test_call_llm_does_not_retry_non_retriable_error(
+        self, request_once, sleep
+    ) -> None:
+        from generate_daily_report import LLMRequestError
+
+        request_once.side_effect = LLMRequestError(
+            "unauthorized", retriable=False, status=401
+        )
+        with self.assertRaises(LLMRequestError):
+            call_llm("key", "https://example.com/v1", "m", "chat_completions", "p")
+        self.assertEqual(request_once.call_count, 1)
+        sleep.assert_not_called()
+
     def test_empty_report_has_required_sections(self) -> None:
         report = empty_report({})
         for title in (
@@ -119,6 +217,31 @@ class GenerateDailyReportTests(unittest.TestCase):
             "## RWKV 待跟进问题",
         ):
             self.assertIn(title, report)
+
+    def test_degraded_report_is_verifiable_and_keeps_previous_todo(self) -> None:
+        previous = (
+            "- [ ] **待回复**｜提问时间：2026-08-10 10:00（北京时间）｜旧问题。"
+            "[原消息](https://discord.com/channels/1/2/8)"
+        )
+        payload = {
+            "report_date": "2026-08-11",
+            "messages": [
+                {
+                    "timestamp_local": "2026-08-11T09:30:00+08:00",
+                    "channel_name": "research",
+                    "author": {"username": "dev"},
+                    "content": "How should RWKV training handle this bug?",
+                    "url": "https://discord.com/channels/1/2/9",
+                }
+            ],
+        }
+        report = build_degraded_report(payload, [previous])
+        self.assertIn("降级说明", report)
+        self.assertIn("How should RWKV", report)
+        self.assertIn("提问时间：2026-08-11 09:30", report)
+        self.assertIn("旧问题", report)
+        normalized = normalize_report(report)
+        validate_report(normalized)
 
     def test_validate_report_accepts_complete_report(self) -> None:
         validate_report(empty_report({}))
@@ -278,4 +401,3 @@ class GenerateDailyReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

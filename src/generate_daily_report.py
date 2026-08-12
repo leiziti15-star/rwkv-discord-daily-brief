@@ -7,7 +7,9 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
@@ -20,7 +22,9 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_API_MODE = "responses"
 DEFAULT_MAX_INPUT_CHARS = 40_000
 DEFAULT_MAX_OUTPUT_TOKENS = 4_000
-DEFAULT_TIMEOUT_SECONDS = 240
+DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_LLM_RETRIES = 2
+DEFAULT_RETRY_BASE_SECONDS = 2.0
 
 REQUIRED_HEADINGS = (
     "## 总览 Brief",
@@ -90,34 +94,53 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def compact_messages(payload: dict[str, Any], limit: int) -> tuple[str, int]:
+def compact_message(item: dict[str, Any]) -> str:
+    """Render one Discord message with the metadata needed for verification."""
+    author_data = item.get("author", {})
+    author = author_data.get("username") or "unknown"
+    author_id = author_data.get("id") or "unknown"
+    channel = item.get("channel_name") or item.get("channel_id") or "unknown"
+    content = " ".join((item.get("content") or "").split())
+    attachments = ", ".join(
+        attachment.get("filename") or attachment.get("url") or "attachment"
+        for attachment in item.get("attachments", [])
+    )
+    if attachments:
+        content = f"{content} [attachments: {attachments}]".strip()
+    return (
+        f"- {item.get('timestamp_local') or item.get('timestamp')} | #{channel} | "
+        f"{author} (Discord user ID: {author_id}): {content}\n"
+        f"  Reply to message ID: {item.get('reply_to_message_id') or 'none'}\n"
+        f"  URL: {item.get('url')}\n"
+    )
+
+
+def compact_message_batches(payload: dict[str, Any], limit: int) -> list[tuple[str, int]]:
+    """Split messages into size-bounded batches without omitting any message."""
+    if limit <= 0:
+        raise ValueError("MAX_INPUT_CHARS must be greater than zero")
+    batches: list[tuple[str, int]] = []
     lines: list[str] = []
     used = 0
-    included = 0
     for item in payload.get("messages", []):
-        author_data = item.get("author", {})
-        author = author_data.get("username") or "unknown"
-        author_id = author_data.get("id") or "unknown"
-        channel = item.get("channel_name") or item.get("channel_id") or "unknown"
-        content = " ".join((item.get("content") or "").split())
-        attachments = ", ".join(
-            attachment.get("filename") or attachment.get("url") or "attachment"
-            for attachment in item.get("attachments", [])
-        )
-        if attachments:
-            content = f"{content} [attachments: {attachments}]".strip()
-        line = (
-            f"- {item.get('timestamp_local') or item.get('timestamp')} | #{channel} | "
-            f"{author} (Discord user ID: {author_id}): {content}\n"
-            f"  Reply to message ID: {item.get('reply_to_message_id') or 'none'}\n"
-            f"  URL: {item.get('url')}\n"
-        )
+        line = compact_message(item)
         if lines and used + len(line) > limit:
-            break
+            batches.append(("".join(lines), len(lines)))
+            lines = []
+            used = 0
         lines.append(line)
         used += len(line)
-        included += 1
-    return "".join(lines), included
+    if lines:
+        batches.append(("".join(lines), len(lines)))
+    return batches
+
+
+def compact_messages(payload: dict[str, Any], limit: int) -> tuple[str, int]:
+    """Backward-compatible helper returning the first size-bounded batch."""
+    batches = compact_message_batches(payload, limit)
+    if not batches:
+        return "", 0
+    return batches[0]
 
 
 def extract_output_text(response: dict[str, Any]) -> str:
@@ -428,6 +451,184 @@ def empty_report(payload: dict[str, Any]) -> str:
     )
 
 
+FALLBACK_BUG_TERMS = (
+    "bug",
+    "error",
+    "exception",
+    "fail",
+    "crash",
+    "issue",
+    "报错",
+    "失败",
+    "崩溃",
+    "异常",
+    "无法",
+)
+FALLBACK_COMMUNITY_TERMS = (
+    "request",
+    "feature",
+    "document",
+    "docs",
+    "tutorial",
+    "guide",
+    "example",
+    "需求",
+    "建议",
+    "文档",
+    "教程",
+    "示例",
+)
+FALLBACK_RELEASE_TERMS = (
+    "release",
+    "released",
+    "model",
+    "checkpoint",
+    "github.com",
+    "huggingface",
+    "发布",
+    "模型",
+    "版本",
+    "仓库",
+)
+FALLBACK_QUESTION_TERMS = ("?", "？", "how ", "why ", "what ", "怎么", "如何", "请问")
+
+
+def fallback_contains(text: str, terms: tuple[str, ...]) -> bool:
+    lowered = text.casefold()
+    return any(term in lowered for term in terms)
+
+
+def fallback_message_text(message: dict[str, Any]) -> str:
+    content = " ".join((message.get("content") or "").split())
+    if not content and message.get("attachments"):
+        content = "附件：" + "、".join(
+            item.get("filename") or "未命名附件"
+            for item in message.get("attachments", [])
+        )
+    content = re.sub(
+        r"https://discord\.com/channels/\d+/\d+/\d+",
+        "Discord 消息链接",
+        content,
+    )
+    content = content.replace("[原消息](", "原消息（")
+    return content[:220]
+
+
+def fallback_source_url(message: dict[str, Any]) -> str | None:
+    url = str(message.get("url") or "")
+    if re.fullmatch(r"https://discord\.com/channels/\d+/\d+/\d+", url):
+        return url
+    return None
+
+
+def fallback_item_line(message: dict[str, Any]) -> str | None:
+    url = fallback_source_url(message)
+    content = fallback_message_text(message)
+    if not url or not content:
+        return None
+    channel = message.get("channel_name") or message.get("channel_id") or "unknown"
+    author = message.get("author", {}).get("username") or "unknown"
+    return f"- **#{channel} · {author}**：{content}。[原消息]({url})"
+
+
+def fallback_question_time(message: dict[str, Any]) -> str | None:
+    timestamp = str(message.get("timestamp_local") or "")
+    match = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})", timestamp)
+    return f"{match.group(1)} {match.group(2)}" if match else None
+
+
+def build_degraded_report(
+    payload: dict[str, Any], previous_reminders: list[str] | None = None
+) -> str:
+    """Produce a verifiable rules-based report when semantic generation is unavailable."""
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "official": [],
+        "tech": [],
+        "bug": [],
+        "community": [],
+        "general": [],
+    }
+    used_urls: set[str] = set()
+    for message in payload.get("messages", []):
+        url = fallback_source_url(message)
+        content = fallback_message_text(message)
+        if not url or not content:
+            continue
+        author = str(message.get("author", {}).get("username") or "").casefold()
+        lowered = content.casefold()
+        is_rwkv = "rwkv" in lowered
+        if (
+            author == "blinkdl"
+            and is_rwkv
+            and fallback_contains(content, FALLBACK_RELEASE_TERMS)
+        ):
+            bucket = "official"
+        elif is_rwkv and fallback_contains(content, FALLBACK_BUG_TERMS):
+            bucket = "bug"
+        elif is_rwkv and fallback_contains(content, FALLBACK_COMMUNITY_TERMS):
+            bucket = "community"
+        elif is_rwkv:
+            bucket = "tech"
+        else:
+            continue
+        if url not in used_urls:
+            buckets[bucket].append(message)
+            used_urls.add(url)
+
+    sections: list[str] = [
+        REQUIRED_HEADINGS[0],
+        "",
+        "> **降级说明**：AI 总结服务暂时不可用，本期为规则生成版；仅列出可直接核验的 RWKV 相关候选消息，未做语义归并，请结合原消息判断。",
+    ]
+    section_specs = (
+        (REQUIRED_HEADINGS[1], "official", 3),
+        (REQUIRED_HEADINGS[2], "tech", 3),
+        (REQUIRED_HEADINGS[3], "bug", 3),
+        (REQUIRED_HEADINGS[4], "community", 3),
+        (REQUIRED_HEADINGS[5], "general", 3),
+    )
+    for heading, key, maximum in section_specs:
+        lines = [
+            line
+            for message in buckets[key][:maximum]
+            if (line := fallback_item_line(message)) is not None
+        ]
+        sections.extend(["", heading, "", *(lines or ["- 无值得报告的新内容。"])])
+
+    reminders_by_url = {
+        url: line
+        for line in previous_reminders or []
+        if (url := todo_source_url(line)) is not None
+    }
+    for message in payload.get("messages", []):
+        content = fallback_message_text(message)
+        url = fallback_source_url(message)
+        question_time = fallback_question_time(message)
+        if (
+            not url
+            or not question_time
+            or "rwkv" not in content.casefold()
+            or not fallback_contains(content, FALLBACK_QUESTION_TERMS)
+        ):
+            continue
+        reminders_by_url[url] = (
+            f"- [ ] **待人工确认**｜提问时间：{question_time}（北京时间）｜"
+            f"{content[:160]}。[原消息]({url})"
+        )
+    todo_lines = list(reminders_by_url.values())[:8]
+    sections.extend(
+        [
+            "",
+            TODO_HEADING,
+            "",
+            TODO_RULE,
+            "",
+            *(todo_lines or ["- 无待跟进问题。"]),
+        ]
+    )
+    return "\n".join(sections)
+
+
 def api_endpoint(base_url: str, api_mode: str) -> str:
     base = base_url.strip().rstrip("/")
     if not base.startswith("https://"):
@@ -441,6 +642,7 @@ def build_request_body(
     api_mode: str,
     prompt: str,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    stream: bool = True,
 ) -> dict[str, Any]:
     if api_mode == "responses":
         return {
@@ -456,25 +658,64 @@ def build_request_body(
             {"role": "user", "content": prompt},
         ],
         "max_tokens": max_output_tokens,
-        "stream": True,
+        "stream": stream,
     }
 
 
-def call_llm(
+class LLMRequestError(RuntimeError):
+    """An LLM request failure annotated with whether retrying is appropriate."""
+
+    def __init__(self, message: str, *, retriable: bool, status: int | None = None):
+        super().__init__(message)
+        self.retriable = retriable
+        self.status = status
+
+
+def log_diagnostic(event: str, **fields: Any) -> None:
+    """Emit a small allow-listed diagnostic record without prompts or credentials."""
+    safe_fields = {
+        key: value
+        for key, value in fields.items()
+        if key
+        in {
+            "api_mode",
+            "attempt",
+            "batch_count",
+            "batch_index",
+            "elapsed_ms",
+            "error_type",
+            "event",
+            "input_chars",
+            "message_count",
+            "model",
+            "output_chars",
+            "status",
+            "stream",
+        }
+    }
+    print(
+        json.dumps({"event": event, **safe_fields}, ensure_ascii=False),
+        file=sys.stderr,
+    )
+
+
+def request_llm_once(
     api_key: str,
     base_url: str,
     model: str,
     api_mode: str,
     prompt: str,
+    *,
+    stream: bool,
+    max_output_tokens: int,
+    timeout_seconds: int,
 ) -> str:
-    max_output_tokens = int(
-        os.environ.get("LLM_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)
-    )
-    timeout_seconds = int(
-        os.environ.get("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
-    )
     request_body = build_request_body(
-        model, api_mode, prompt, max_output_tokens=max_output_tokens
+        model,
+        api_mode,
+        prompt,
+        max_output_tokens=max_output_tokens,
+        stream=stream,
     )
     request = urllib.request.Request(
         api_endpoint(base_url, api_mode),
@@ -487,22 +728,106 @@ def call_llm(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            if api_mode == "chat_completions":
+            if api_mode == "chat_completions" and stream:
                 text = extract_chat_completion_stream(response)
+            elif api_mode == "chat_completions":
+                text = extract_chat_completion_text(json.load(response))
             else:
                 text = extract_output_text(json.load(response))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
-        raise RuntimeError(f"LLM API returned HTTP {exc.code}: {detail}") from exc
+        retriable = exc.code in (408, 409, 425, 429) or exc.code >= 500
+        raise LLMRequestError(
+            f"LLM API returned HTTP {exc.code}: {detail}",
+            retriable=retriable,
+            status=exc.code,
+        ) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Unable to connect to LLM API: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise RuntimeError(
-            f"LLM API did not respond within {timeout_seconds} seconds"
+        raise LLMRequestError(
+            f"Unable to connect to LLM API: {exc.reason}", retriable=True
+        ) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise LLMRequestError(
+            f"LLM API did not respond within {timeout_seconds} seconds",
+            retriable=True,
+        ) from exc
+    except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+        raise LLMRequestError(
+            "LLM API returned a malformed response", retriable=True
         ) from exc
     if not text:
-        raise RuntimeError("LLM API response did not contain usable text")
+        raise LLMRequestError(
+            "LLM API response did not contain usable text", retriable=True
+        )
     return text
+
+
+def call_llm(
+    api_key: str,
+    base_url: str,
+    model: str,
+    api_mode: str,
+    prompt: str,
+) -> str:
+    """Call the LLM with backoff and a final non-streaming compatibility attempt."""
+    max_output_tokens = int(
+        os.environ.get("LLM_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)
+    )
+    timeout_seconds = int(
+        os.environ.get("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
+    )
+    retries = max(0, int(os.environ.get("LLM_RETRIES", DEFAULT_LLM_RETRIES)))
+    retry_base_seconds = max(
+        0.0,
+        float(
+            os.environ.get("LLM_RETRY_BASE_SECONDS", DEFAULT_RETRY_BASE_SECONDS)
+        ),
+    )
+    total_attempts = retries + 1
+    last_error: LLMRequestError | None = None
+    for attempt_index in range(total_attempts):
+        attempt = attempt_index + 1
+        stream = api_mode == "chat_completions" and attempt < total_attempts
+        started = time.monotonic()
+        try:
+            text = request_llm_once(
+                api_key,
+                base_url,
+                model,
+                api_mode,
+                prompt,
+                stream=stream,
+                max_output_tokens=max_output_tokens,
+                timeout_seconds=timeout_seconds,
+            )
+            log_diagnostic(
+                "llm_request",
+                api_mode=api_mode,
+                model=model,
+                attempt=attempt,
+                stream=stream,
+                elapsed_ms=round((time.monotonic() - started) * 1000),
+                output_chars=len(text),
+                status="ok",
+            )
+            return text
+        except LLMRequestError as exc:
+            last_error = exc
+            log_diagnostic(
+                "llm_request",
+                api_mode=api_mode,
+                model=model,
+                attempt=attempt,
+                stream=stream,
+                elapsed_ms=round((time.monotonic() - started) * 1000),
+                error_type=type(exc.__cause__ or exc).__name__,
+                status=exc.status or "error",
+            )
+            if not exc.retriable or attempt == total_attempts:
+                raise
+            time.sleep(retry_base_seconds * (2**attempt_index))
+    assert last_error is not None
+    raise last_error
 
 
 def build_prompt(
@@ -510,16 +835,25 @@ def build_prompt(
     message_text: str,
     included: int,
     previous_reminders: list[str] | None = None,
+    batch_index: int | None = None,
+    batch_count: int | None = None,
 ) -> str:
     stats = payload.get("stats", {})
     total = len(payload.get("messages", []))
-    omitted = max(0, total - included)
+    omitted = 0 if batch_count else max(0, total - included)
     reminder_text = "\n".join(previous_reminders or []) or "无"
+    batch_text = (
+        f"当前是第 {batch_index}/{batch_count} 批，共 {included} 条消息；"
+        "其余消息会由其他批次处理，不得声称它们被省略。"
+        if batch_index and batch_count
+        else "当前材料是本期全部消息。"
+    )
     return f"""报告日期：{payload.get('report_date')}
 服务器：{payload.get('guild_name') or payload.get('guild_id')}
 时区：{payload.get('timezone')}
 统计：{stats.get('message_count', total)} 条消息，{stats.get('active_channel_count', 0)} 个活跃频道，{stats.get('active_user_count', 0)} 位参与者。
 因输入长度限制省略的消息数：{omitted}
+分批说明：{batch_text}
 采集警告：{json.dumps(payload.get('warnings', []), ensure_ascii=False)}
 
 以下是最近日报中仍待跟进的问题。除非当天消息给出明确答复，否则继续保留；相同原消息只保留一次。不要保留超过 7 天的问题：
@@ -528,6 +862,103 @@ def build_prompt(
 以下为 Discord 消息材料：
 {message_text}
 """
+
+
+def build_merge_prompt(
+    payload: dict[str, Any],
+    partial_reports: list[str],
+    previous_reminders: list[str] | None = None,
+) -> str:
+    """Build a final reduction prompt from complete per-batch reports."""
+    reminder_text = "\n".join(previous_reminders or []) or "无"
+    parts = "\n\n".join(
+        f"### 分批摘要 {index}\n{report}"
+        for index, report in enumerate(partial_reports, start=1)
+    )
+    return f"""报告日期：{payload.get('report_date')}
+服务器：{payload.get('guild_name') or payload.get('guild_id')}
+本期全部 Discord 消息已经分成 {len(partial_reports)} 批逐批分析，没有省略消息。
+
+请把以下分批摘要合并成一份最终日报。跨批次合并同一话题、去重，并保留最有代表性的原消息链接。不要把“分批”写进最终日报。必须继续执行 RWKV 相关性筛选、BlinkDL 官方发布规则、七个固定栏目和篇幅限制。
+
+最近日报中仍待跟进的问题：
+{reminder_text}
+
+{parts}
+"""
+
+
+def generate_report_with_batches(
+    api_key: str,
+    base_url: str,
+    model: str,
+    api_mode: str,
+    payload: dict[str, Any],
+    limit: int,
+    previous_reminders: list[str] | None = None,
+) -> str:
+    """Analyze every collected message, using map/reduce only when necessary."""
+    batches = compact_message_batches(payload, limit)
+    total_messages = len(payload.get("messages", []))
+    log_diagnostic(
+        "llm_batches",
+        batch_count=len(batches),
+        message_count=sum(count for _text, count in batches),
+        input_chars=sum(len(text) for text, _count in batches),
+        status="ready",
+    )
+    if not batches:
+        return empty_report(payload)
+    if len(batches) == 1:
+        message_text, included = batches[0]
+        return call_llm(
+            api_key,
+            base_url,
+            model,
+            api_mode,
+            build_prompt(
+                payload,
+                message_text,
+                included,
+                previous_reminders=previous_reminders,
+            ),
+        )
+
+    partial_reports: list[str] = []
+    for index, (message_text, included) in enumerate(batches, start=1):
+        log_diagnostic(
+            "llm_batch",
+            batch_index=index,
+            batch_count=len(batches),
+            message_count=included,
+            input_chars=len(message_text),
+            status="started",
+        )
+        partial_reports.append(
+            call_llm(
+                api_key,
+                base_url,
+                model,
+                api_mode,
+                build_prompt(
+                    payload,
+                    message_text,
+                    included,
+                    previous_reminders=previous_reminders,
+                    batch_index=index,
+                    batch_count=len(batches),
+                ),
+            )
+        )
+    if sum(count for _text, count in batches) != total_messages:
+        raise RuntimeError("Internal batching error: not all Discord messages were included")
+    return call_llm(
+        api_key,
+        base_url,
+        model,
+        api_mode,
+        build_merge_prompt(payload, partial_reports, previous_reminders),
+    )
 
 
 def main() -> int:
@@ -542,44 +973,45 @@ def main() -> int:
     previous_reminders = load_recent_todo_reminders(output_dir, report_date)
 
     messages = payload.get("messages", [])
+    used_degraded_report = False
     if messages:
         api_key = (
             os.environ.get("LLM_API_KEY", "").strip()
             or os.environ.get("OPENAI_API_KEY", "").strip()
         )
-        if not api_key:
-            print("Missing LLM_API_KEY", file=sys.stderr)
-            return 2
         limit = int(os.environ.get("MAX_INPUT_CHARS", DEFAULT_MAX_INPUT_CHARS))
-        message_text, included = compact_messages(payload, limit)
-        print(
-            json.dumps(
-                {
-                    "llm_input_chars": len(message_text),
-                    "llm_input_message_count": included,
-                    "llm_input_omitted_count": max(0, len(messages) - included),
-                }
-            )
-        )
-        report_body = call_llm(
-            api_key,
-            args.base_url,
-            args.model,
-            args.api_mode,
-            build_prompt(
+        try:
+            if not api_key:
+                raise LLMRequestError("Missing LLM_API_KEY", retriable=False)
+            report_body = generate_report_with_batches(
+                api_key,
+                args.base_url,
+                args.model,
+                args.api_mode,
                 payload,
-                message_text,
-                included,
+                limit,
                 previous_reminders=previous_reminders,
-            ),
-        )
+            )
+            report_body = normalize_report(report_body)
+        except Exception as exc:
+            used_degraded_report = True
+            log_diagnostic(
+                "llm_fallback",
+                api_mode=args.api_mode,
+                model=args.model,
+                error_type=type(exc).__name__,
+                message_count=len(messages),
+                status="degraded_report",
+            )
+            report_body = normalize_report(
+                build_degraded_report(payload, previous_reminders)
+            )
     else:
-        included = 0
         report_body = empty_report(payload)
         if previous_reminders:
             report_body = replace_todo_items(report_body, previous_reminders)
+        report_body = normalize_report(report_body)
 
-    report_body = normalize_report(report_body)
     report_body = enforce_todo_window(report_body, report_date)
     report_body = add_activity_summary(report_body, payload)
     report_body = add_todo_summary(report_body, report_date)
@@ -596,8 +1028,16 @@ def main() -> int:
                 f"{stats.get('active_channel_count', 0)} 个频道 / "
                 f"{stats.get('active_user_count', 0)} 位参与者"
             ),
-            f"总结模型：{args.model if messages else '未调用（当日无消息）'}",
-            f"总结接口：{args.api_mode if messages else '未调用（当日无消息）'}",
+            (
+                "总结模型：规则降级版（AI 请求失败）"
+                if used_degraded_report
+                else f"总结模型：{args.model if messages else '未调用（当日无消息）'}"
+            ),
+            (
+                "总结接口：未使用（AI 请求失败后降级）"
+                if used_degraded_report
+                else f"总结接口：{args.api_mode if messages else '未调用（当日无消息）'}"
+            ),
             "说明：仓库只保存最终摘要，不保存原始 Discord 聊天记录。",
         ]
     )
@@ -608,4 +1048,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
