@@ -1,0 +1,132 @@
+name: Backfill Chinese reports 2026-08-12 and 2026-08-13
+
+on:
+  push:
+    paths:
+      - ".github/workflows/backfill-2026-08-12-13.yml"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: rwkv-daily-brief
+  cancel-in-progress: false
+
+jobs:
+  backfill-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+      DISCORD_GUILD_ID: ${{ vars.DISCORD_GUILD_ID }}
+      DISCORD_GUILD_NAME: RWKV
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: https://next-token.cc/v1
+      LLM_MODEL: deepseek-v4-flash
+      LLM_API_MODE: chat_completions
+      LLM_RETRIES: 2
+      LLM_RETRY_BASE_SECONDS: 2
+      LLM_TIMEOUT_SECONDS: 120
+      MAX_INPUT_CHARS: 40000
+      TIMEZONE: Asia/Shanghai
+      CHANNEL_RULES_PATH: config/channel_rules.json
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          test -n "$DISCORD_BOT_TOKEN" || { echo "Missing DISCORD_BOT_TOKEN"; exit 1; }
+          test -n "$LLM_API_KEY" || { echo "Missing LLM_API_KEY"; exit 1; }
+
+      - name: Generate both candidate reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          for DATE in 2026-08-12 2026-08-13; do
+            python src/discord_daily.py --date "$DATE" --output-dir work/run
+            python src/generate_daily_report.py "work/run/discord_messages_$DATE.json" --output-dir reports
+          done
+
+      - name: Validate both Chinese reports
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          for report_date in ("2026-08-12", "2026-08-13"):
+              report_path = Path(f"reports/{report_date}.md")
+              report = report_path.read_text(encoding="utf-8")
+              required = (
+                  f"# RWKV Discord Daily Brief | {report_date}",
+                  "## 总览 Brief",
+                  "## RWKV 官方发布与作者动态",
+                  "## RWKV 技术相关讨论",
+                  "## Bug 与问题",
+                  "## 社区反馈",
+                  "## General",
+                  "## RWKV 待跟进问题",
+              )
+              missing = [heading for heading in required if heading not in report]
+              if missing:
+                  raise SystemExit(
+                      f"{report_date}: missing required headings: {missing}"
+                  )
+              if (
+                  "规则降级版" in report
+                  or "AI 请求失败" in report
+                  or "降级说明" in report
+              ):
+                  raise SystemExit(
+                      f"{report_date}: refusing to publish a degraded report"
+                  )
+              if len(re.findall(r"[\u4e00-\u9fff]", report)) < 40:
+                  raise SystemExit(
+                      f"{report_date}: Chinese content is insufficient"
+                  )
+              if report.count("[原消息](") != len(
+                  re.findall(
+                      r"\[原消息\]\(https://discord\.com/channels/\d+/\d+/\d+\)",
+                      report,
+                  )
+              ):
+                  raise SystemExit(
+                      f"{report_date}: invalid or expanded Discord source link"
+                  )
+              print(f"Validated publishable Chinese report: {report_path}")
+          PY
+
+      - name: Replace both reports in one commit
+        shell: bash
+        run: |
+          git config user.name "rwkv-daily-brief[bot]"
+          git config user.email "rwkv-daily-brief[bot]@users.noreply.github.com"
+          git add -- reports/2026-08-12.md reports/2026-08-13.md
+          if git diff --cached --quiet; then
+            echo "Reports unchanged; no commit needed."
+          else
+            git commit -m "daily brief: regenerate 2026-08-12 and 2026-08-13 in Chinese"
+            git push
+          fi
+
+      - name: Update the original daily Issues
+        shell: bash
+        run: |
+          set -euo pipefail
+          for DATE in 2026-08-12 2026-08-13; do
+            TITLE="RWKV Discord Daily Brief | $DATE"
+            REPORT="reports/$DATE.md"
+            NUMBER="$(gh issue list --state all --search "\"$TITLE\" in:title" --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n 1)"
+            test -n "$NUMBER" || { echo "Existing issue not found: $TITLE"; exit 1; }
+            gh issue edit "$NUMBER" --body-file "$REPORT"
+          done
