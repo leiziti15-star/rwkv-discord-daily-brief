@@ -77,6 +77,36 @@ jobs:
       - name: Generate daily brief
         run: python src/generate_daily_report.py "work/run/discord_messages_${{ steps.report.outputs.date }}.json" --output-dir reports
 
+      - name: Validate Chinese report before publishing
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          report_date = "${{ steps.report.outputs.date }}"
+          report_path = Path(f"reports/{report_date}.md")
+          report = report_path.read_text(encoding="utf-8")
+          required = (
+              f"# RWKV Discord Daily Brief | {report_date}",
+              "## 总览 Brief",
+              "## RWKV 官方发布与作者动态",
+              "## RWKV 技术相关讨论",
+              "## Bug 与问题",
+              "## 社区反馈",
+              "## General",
+              "## RWKV 待跟进问题",
+          )
+          missing = [heading for heading in required if heading not in report]
+          if missing:
+              raise SystemExit(f"Report validation failed; missing headings: {missing}")
+          if "规则降级版" in report or "AI 请求失败" in report or "降级说明" in report:
+              raise SystemExit("Report validation failed; refusing to publish a degraded report")
+          if len(re.findall(r"[\u4e00-\u9fff]", report)) < 40:
+              raise SystemExit("Report validation failed; Chinese content is insufficient")
+          print(f"Validated publishable Chinese report: {report_path}")
+          PY
+
       - name: Commit report only
         shell: bash
         run: |
